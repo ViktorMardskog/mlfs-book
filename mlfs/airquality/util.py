@@ -80,7 +80,8 @@ def get_hourly_weather_forecast(city, latitude, longitude):
     params = {
         "latitude": latitude,
         "longitude": longitude,
-        "hourly": ["temperature_2m", "precipitation", "wind_speed_10m", "wind_direction_10m"]
+        "hourly": ["temperature_2m", "precipitation", "wind_speed_10m", "wind_direction_10m"],
+        "forecast_days": 9 #
     }
     responses = openmeteo.weather_api(url, params=params)
 
@@ -298,3 +299,41 @@ def backfill_predictions_for_monitoring(weather_fg, air_quality_df, monitor_fg, 
     df = df.drop('pm25', axis=1)
     monitor_fg.insert(df, write_options={"wait_for_job": True})
     return hindcast_df
+
+def backfill_predictions_for_monitoring_lag_model(weather_fg, air_quality_df_v2, monitor_fg, model, feature_cols, country, city, street):
+    features_df = weather_fg.read()
+    features_df["date"] = pd.to_datetime(features_df["date"])
+    features_df = features_df.sort_values(by=['date'], ascending=True)
+    
+    sensor_history = air_quality_df_v2.query("country == @country and city == @city and street == @street").copy()
+    sensor_history["date"] = pd.to_datetime(sensor_history["date"])
+
+    sensor_history = sensor_history[["date", "pm25", "pm25_lag1", "pm25_lag2", "pm25_lag3"]] 
+    features_df = pd.merge(
+        features_df,
+        sensor_history,
+        on="date",
+        how="inner",   #only keep dataes both have (but it shouldnt be a problem)
+    )
+
+    features_df = features_df.sort_values("date")
+    features_df = features_df.tail(10)
+
+    features_df = features_df.dropna(subset=["pm25_lag1", "pm25_lag2", "pm25_lag3"])  #should not be any, but just in case
+    
+    features_df["predicted_pm25"] = model.predict(features_df[feature_cols])
+    for col in ["pm25_lag1", "pm25_lag2", "pm25_lag3", "predicted_pm25"]:
+        features_df[col] = features_df[col].astype("float64")
+        
+    features_df['days_before_forecast_day'] = 1
+    features_df['city'] = city
+    features_df['country'] = country
+    features_df['street'] = street
+    
+    hindcast_df = features_df.copy()
+    features_df = features_df.drop('pm25', axis=1)
+    monitor_fg.insert(features_df, write_options={"wait_for_job": True})
+    
+    return hindcast_df
+
+    
